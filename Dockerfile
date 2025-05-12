@@ -20,5 +20,5 @@ RUN chmod +x /app/run.sh
 # Expose port (optional, as Railway overrides it)
 EXPOSE 8000
 
-# Set entrypoint
-ENTRYPOINT ["/app/run.sh"]
+# Run the app with uv
+CMD ["/root/.local/bin/uv", "run", "main.py"]
