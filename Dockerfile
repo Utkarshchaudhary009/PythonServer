@@ -14,9 +14,6 @@ COPY . /app/
 # Set up virtual environment with UV
 RUN uv sync
 
-# Make entrypoint executable
-RUN chmod +x /app/run.sh
-
 # Expose port (optional, as Railway overrides it)
 EXPOSE 8000
 
