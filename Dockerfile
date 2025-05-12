@@ -18,4 +18,4 @@ RUN uv sync
 EXPOSE 8000
 
 # Run the app with uv
-CMD ["/root/.local/bin/uv", "run", "main.py"]
+CMD ["uv", "run", "main.py"]
