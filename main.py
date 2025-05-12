@@ -18,7 +18,7 @@ from spotipy.oauth2 import SpotifyClientCredentials
 from youtubesearchpython import VideosSearch
 import yt_dlp
 from uuid import uuid4
-
+import subprocess
 subprocess.run(["ffmpeg",'-version'])
 
 # install uuid wth code = pip install uuid
@@ -128,46 +128,40 @@ async def download_audio(youtube_url: str) -> tuple[Path, Path]:
 async def search_and_download_audio(query: str) -> tuple[Path, Path]:
     """Download audio from YouTube URL and return the file path."""
     logger.info(f"Downloading audio from: {query}")
-     # Unique identifier for the download folder
+    # First get the YouTube URL
+    youtube_url, _ = await search_youtube(query)
+    
+    # Unique identifier for the download folder
     uid = str(uuid4())
-    temp_dir="temp_dir"
-    download_path = os.path.join("temp_dir", uid)
+    temp_dir = Path("temp_dir")
+    download_path = temp_dir / uid
     os.makedirs(download_path, exist_ok=True)
 
     # Options for yt-dlp
     ydl_opts = {
-        'format': 'bestaudio/best',  # Download the best available audio
-        'outtmpl': os.path.join(download_path, '%(title)s.%(ext)s'),  # Template for file naming
-        'quiet': True,  # Suppress output to keep things clean
+        'format': 'bestaudio/best',
+        'outtmpl': str(download_path / '%(title)s.%(ext)s'),
+        'postprocessors': [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+            'preferredquality': '192',
+        }],
+        'quiet': True,
     }
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)  # Start downloading
-      # Get original file path
-    original_filename= False
-    for ext in ["webm","m4p"]:
-        original_filename = os.path.join(download_path, f"{info['title']}.{ext}")
-        if os.path.exists(original_filename):
-            break
-
-    # Extract the base filename without extension
-    base_filename = os.path.splitext(original_filename)[0]
-    
-    # Set the new filename with .mp3 extension
-    mp3_filename = base_filename + '.mp3'
-
-    # Convert the file using FFmpeg
-    # The command: ffmpeg -i input_file output_file
     try:
-        subprocess.run(['ffmpeg', '-i', original_filename, mp3_filename], check=True)
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
         
-        # Delete the original file after conversion (if you want to save space)
-        os.remove(original_filename)
-
-        return mp3_filename  # Return the path of the converted .mp3 file
-    except subprocess.CalledProcessError as e:
-        print(f"Error during conversion: {e}")
-        return None
+        # Find the downloaded MP3 file
+        mp3_files = list(download_path.glob('*.mp3'))
+        if not mp3_files:
+            raise HTTPException(status_code=404, detail="MP3 file not found")
+        
+        return mp3_files[0], temp_dir
+    except Exception as e:
+        shutil.rmtree(temp_dir)
+        raise HTTPException(status_code=500, detail=f"Failed to download audio: {str(e)}")
 
 async def fetch_spotify_metadata(query: str) -> dict:
     """Fetch song metadata from Spotify."""
