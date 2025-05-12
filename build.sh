@@ -1,0 +1,1 @@
+pip install uv && uv sync && apt update && apt install -y ffmpeg
