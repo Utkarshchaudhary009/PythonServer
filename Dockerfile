@@ -1,7 +1,7 @@
 FROM python:3.13
 
 # Install FFmpeg (if needed, e.g., for multimedia tasks)
-RUN apt-get update && apt-get install -y ffmpeg
+# RUN apt-get update && apt-get install -y ffmpeg
 
 RUN pip install uv
 
