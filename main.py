@@ -6,12 +6,11 @@ from pathlib import Path
 import logging
 import urllib.parse
 import requests
-from flask import Flask, request, jsonify, send_file, render_template
+from flask import Flask, request, jsonify, send_file, render_template, after_this_request
 from werkzeug.utils import secure_filename
 from dotenv import load_dotenv
 from mutagen.mp3 import MP3
-from mutagen.id3 import ID3, TIT2, TPE1, TALB, TYER, USLT, APIC, TCON, TRCK, TCOM, COMM, TDRC
-from mutagen.easyid3 import EasyID3
+from mutagen.id3 import error as ID3Error,ID3, TIT2, TPE1, TALB, TYER, USLT, APIC, TCON, TRCK, TCOM, COMM, TDRC
 import spotipy
 from spotipy.oauth2 import SpotifyClientCredentials
 import re
@@ -160,8 +159,6 @@ def get_complete_spotify_metadata(track_id):
         # Get audio features (tempo, key, etc.)
         audio_features = sp.audio_features(track_id)[0]
     
-        
-        
         # Combine all metadata
         metadata = {
             "title": track['name'],
@@ -171,8 +168,8 @@ def get_complete_spotify_metadata(track_id):
             "cover_url": track['album']['images'][0]['url'] if track['album']['images'] else None,
             "track_number": track.get('track_number', 1),
             "disc_number": track.get('disc_number', 1),
-            "total_tracks": album.get('total_tracks', 1),
-            "genres": artist.get('genres', []),
+            "total_tracks": track['album'].get('total_tracks', 1),
+            "genres": track['artists'][0].get('genres', []),
             "duration_ms": track.get('duration_ms', 0),
             "release_date": track['album']['release_date'],
             "explicit": track.get('explicit', False),
@@ -189,6 +186,55 @@ def get_complete_spotify_metadata(track_id):
     except Exception as e:
         logger.error(f"Error fetching Spotify metadata: {str(e)}")
         return None
+
+def clear_and_add_cover(audio, image_url):
+    """
+    Removes existing cover art and adds new one from a given image URL.
+    Returns True if successful, False otherwise.
+    """
+    try:
+        if audio.tags is None:
+            audio.add_tags()
+
+        # Remove existing APIC (cover) tags
+        to_delete = [key for key in audio.tags.keys() if key.startswith("APIC")]
+        for key in to_delete:
+            del audio.tags[key]
+
+        # Only download and add cover if image_url is provided
+        if image_url:
+            # Download new cover image
+            response = requests.get(image_url)
+            response.raise_for_status()
+            mime = response.headers.get('Content-Type', 'image/jpeg')
+
+            audio.tags.add(
+                APIC(
+                    encoding=3,
+                    mime=mime,
+                    type=3,  # front cover
+                    desc='Cover',
+                    data=response.content
+            ))
+            # Add back cover
+            audio.tags.add(
+                APIC(
+                    encoding=3,
+                    mime=mime,
+                    type=4,  # back cover
+                    desc='Cover',
+                    data=response.content
+            ))
+
+        audio.save()
+        return True
+
+    except ID3Error as e:
+        print(f"ID3 error: {e}")
+        return False
+    except Exception as e:
+        print(f"Unexpected error: {e}")
+        return False
 
 def embed_metadata(file_path, metadata, lyrics=""):
     """Embed metadata and lyrics into the MP3 file."""
@@ -236,89 +282,15 @@ def embed_metadata(file_path, metadata, lyrics=""):
 
         # Add cover art if available
         if "cover_url" in metadata and metadata["cover_url"]:
-            try:
-                response = requests.get(metadata["cover_url"])
-                if response.status_code == 200:
-                    audio.tags.add(APIC(
-                        encoding=3,
-                        mime='image/jpeg',
-                        type=3,
-                        desc='Cover',
-                        data=response.content
-                    ))
-            except Exception as e:
-                logger.warning(f"Could not add cover art: {str(e)}")
-
-        audio.save()
-        return True
+            return clear_and_add_cover(audio, metadata["cover_url"])
+        else:
+            audio.save()
+            return True
+    
     except Exception as e:
         logger.error(f"Failed to embed metadata: {str(e)}")
         return False
 
-
-def embed_metadata_memory(mp3_data: bytes, metadata: dict, lyrics: str = "") -> bytes | None:
-    """Embed metadata and lyrics into the MP3 file in memory and return the updated data."""
-    logger.info("Embedding metadata into in-memory MP3 data")
-    
-    try:
-        mp3_io = BytesIO(mp3_data)
-        audio = MP3(mp3_io, ID3=ID3)
-
-        try:
-            audio.add_tags()
-        except Exception:
-            pass
-
-        # Add basic metadata
-        audio.tags.add(TIT2(encoding=3, text=metadata["title"]))
-        audio.tags.add(TPE1(encoding=3, text=metadata["artist"]))
-        audio.tags.add(TALB(encoding=3, text=metadata["album"]))
-        
-        if "year" in metadata and metadata["year"]:
-            audio.tags.add(TYER(encoding=3, text=metadata["year"]))
-            audio.tags.add(TDRC(encoding=3, text=metadata["year"]))
-        
-        if "track_number" in metadata:
-            track_text = f"{metadata['track_number']}"
-            if "total_tracks" in metadata:
-                track_text += f"/{metadata['total_tracks']}"
-            audio.tags.add(TRCK(encoding=3, text=track_text))
-        
-        if "genres" in metadata and metadata["genres"]:
-            audio.tags.add(TCON(encoding=3, text=metadata["genres"][0]))
-        
-        if "composers" in metadata and metadata["composers"]:
-            audio.tags.add(TCOM(encoding=3, text=metadata["composers"]))
-        
-        if "popularity" in metadata:
-            audio.tags.add(COMM(encoding=3, lang='eng', desc='Popularity',
-                                text=f"Popularity: {metadata['popularity']}/100"))
-
-        if lyrics:
-            audio.tags.add(USLT(encoding=3, desc="Lyrics", text=lyrics))
-
-        if "cover_url" in metadata and metadata["cover_url"]:
-            try:
-                response = requests.get(metadata["cover_url"])
-                if response.status_code == 200:
-                    audio.tags.add(APIC(
-                        encoding=3,
-                        mime='image/jpeg',
-                        type=3,
-                        desc='Cover',
-                        data=response.content
-                    ))
-            except Exception as e:
-                logger.warning(f"Could not add cover art: {str(e)}")
-
-        # Save tags to a new BytesIO object
-        output_io = BytesIO()
-        audio.save(output_io)
-        return output_io.getvalue()
-
-    except Exception as e:
-        logger.error(f"Failed to embed metadata: {str(e)}")
-        return None
 
 @app.route('/search', methods=['POST'])
 def search():
@@ -353,6 +325,31 @@ def search():
     except Exception as e:
         logger.error(f"Search endpoint error: {str(e)}")
         return jsonify({"success": False, "error": str(e)}), 500
+@app.route('/search/<query>', methods=['GET'])
+def getsearch(query):
+    try:
+        logger.info(f"search: {query}")
+        # Get the query from the request
+        # query = request.args.get('query')
+        audio_url, page_url, title = search_pagalworld(query)
+        
+        if not audio_url:
+            return jsonify({
+                "success": False, 
+                "error": "Could not find audio URL for the given query"
+            }), 404
+        
+        return jsonify({
+            "success": True,
+            "audio_url": audio_url,
+            "page_url": page_url,
+            "title": title
+        })
+    
+    except Exception as e:
+        logger.error(f"Search endpoint error: {str(e)}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
 
 @app.route('/download', methods=['POST'])
 def download():
@@ -369,34 +366,52 @@ def download():
         artist_name = track.get("artists", [{}])[0].get("name", "")
         
         # Build metadata directly from the request data
-        metadata = {
-            "title": track_name,
-            "artist": artist_name,
-            "album": track.get("album_name", track.get("name", "")),  # Fallback to track name if album name is missing
-            "year": track.get("release_date", "")[:4] if track.get("release_date") else "",
-            "cover_url": None,
-            "track_number": track.get("track_number", 1),
-            "total_tracks": track.get("total_tracks", 1),
-            "genres": [],
-            "duration_ms": track.get("duration_ms", 0),
-            "release_date": track.get("release_date", ""),
-            "explicit": track.get("explicit", False),
-            "popularity": track.get("popularity", 0),
-            "artists": [artist.get("name", "") for artist in track.get("artists", [])],
-            "album_artist": artist_name,
-        }
+        metadata = get_complete_spotify_metadata(track["id"])
+        
+        # If metadata couldn't be fetched from Spotify, create a basic version
+        if metadata is None:
+            metadata = {
+                "title": track_name,
+                "artist": artist_name,
+                "album": track.get("album_name", track.get("name", "")),
+                "year": track.get("release_date", "")[:4] if track.get("release_date") else "",
+                "cover_url": None,
+                "track_number": track.get("track_number", 1),
+                "total_tracks": track.get("total_tracks", 1),
+                "genres": [],
+                "duration_ms": track.get("duration_ms", 0),
+                "release_date": track.get("release_date", ""),
+                "explicit": track.get("explicit", False),
+                "popularity": track.get("popularity", 0),
+                "artists": [artist.get("name", "") for artist in track.get("artists", [])],
+                "album_artist": artist_name,
+            }
         
         # Handle album data specifically since it can have different structures
         if "album" in track:
             album = track["album"]
-            metadata["album"] = album.get("name", "")
-            metadata["year"] = album.get("release_date", "")[:4] if album.get("release_date") else ""
-            metadata["release_date"] = album.get("release_date", "")
-            metadata["total_tracks"] = album.get("total_tracks", 1)
+            # Only update if album name exists
+            if "name" in album:
+                metadata["album"] = album.get("name", "")
             
-            # Get cover URL if available
-        if "images" in track and len(track["images"]) > 0:
-                metadata["cover_url"] = track["images"][0].get("url")
+            # Safely handle release_date which might not exist
+            if "release_date" in album and album.get("release_date"):
+                metadata["year"] = album.get("release_date", "")[:4]
+                metadata["release_date"] = album.get("release_date", "")
+            
+            if "total_tracks" in album:
+                metadata["total_tracks"] = album.get("total_tracks", 1)
+            
+            # Handle cover URL if available
+            if "images" in album and album["images"] and len(album["images"]) > 0:
+                if "url" in album["images"][0]:
+                    metadata["cover_url"] = album["images"][0]["url"]
+        
+        # Fallback for cover URL from track directly
+        if "cover_url" not in metadata or not metadata["cover_url"]:
+            if "images" in track and track["images"] and len(track["images"]) > 0:
+                if "url" in track["images"][0]:
+                    metadata["cover_url"] = track["images"][0]["url"]
         
         # logger.info(f"track: {track}")
         # logger.info(f"metadata: {metadata}")
@@ -415,62 +430,39 @@ def download():
                 "success": False, 
                 "error": "Could not find song on pagalworld.com.co"
             }), 404
+    
+        # Create temporary directory
+        # temp_dir = Path(tempfile.mkdtemp())
+        mp3_file = f"./{secure_filename(track_name)}.mp3"
         
-        # Method 1: Download to disk first
-        if False:  # Set to True if you want to use disk-based processing
-            # Create temporary directory
-            temp_dir = Path(tempfile.mkdtemp())
-            mp3_file = temp_dir / f"{secure_filename(track_name)}.mp3"
-            
-            # Download the MP3
-            if not download_mp3(audio_url, mp3_file):
-                return jsonify({
-                    "success": False,
-                    "error": "Failed to download MP3"
-                }), 500
-            
-            # Embed metadata
-            if not embed_metadata(mp3_file, metadata, lyrics):
-                return jsonify({
-                    "success": False,
-                    "error": "Failed to embed metadata"
-                }), 500
-            
-            # Send the file
-            return send_file(
-                mp3_file, 
-                mimetype="audio/mpeg",
-                as_attachment=True,
-                download_name=f"{track_name} - {artist_name}.mp3"
-            )
+        # Download the MP3
+        if not download_mp3(audio_url, mp3_file):
+            return jsonify({
+                "success": False,
+                "error": "Failed to download MP3"
+            }), 500
         
-        # Method 2: Process in memory (more efficient)
-        else:
-            # Download the MP3 directly to memory
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-                'Referer': 'https://pagalworld.com.co/'
-            }
-            
-            response = requests.get(audio_url, headers=headers)
-            response.raise_for_status()
-            
-            # Embed metadata
-            modified_mp3 = embed_metadata_memory(response.content, metadata, lyrics)
-            
-            if not modified_mp3:
-                return jsonify({
-                    "success": False,
-                    "error": "Failed to embed metadata"
-                }), 500
-            
-            # Send the file
-            return send_file(
-                BytesIO(modified_mp3),
-                mimetype="audio/mpeg",
-                as_attachment=True,
-                download_name=f"{track_name} - {artist_name}.mp3"
-                )
+        # Embed metadata
+        if not embed_metadata(mp3_file, metadata, lyrics):
+            return jsonify({
+                "success": False,
+                "error": "Failed to embed metadata"
+            }), 500
+        @after_this_request
+        def remove_file(response):
+            try:
+                os.remove(mp3_file)
+            except Exception as e:
+                print(f"Error deleting file: {e}")
+            return response
+        logger.info(f"Sending file: {mp3_file}")
+        # Send the file
+        return send_file(
+            mp3_file, 
+            mimetype="audio/mpeg",
+            as_attachment=True,
+            download_name=f"{track_name} - {artist_name}.mp3"
+        )
 
     except Exception as e:
         logger.error(f"Download endpoint error: {str(e)}")
